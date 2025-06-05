@@ -55,6 +55,22 @@ class TransparentImageComposer:
                     "step": 1,
                     "display": "number"
                 }),
+                "auto_transparent": ("BOOLEAN", {
+                    "default": True,
+                    "label_on": "ON",
+                    "label_off": "OFF"
+                }),
+                "transparent_threshold": ("INT", {
+                    "default": 240,
+                    "min": 0,
+                    "max": 255,
+                    "step": 1,
+                    "display": "number"
+                }),
+                "transparent_color": ("STRING", {
+                    "default": "white",
+                    "multiline": False
+                }),
             }
         }
     
@@ -93,15 +109,77 @@ class TransparentImageComposer:
         
         return tensor
     
-    def create_alpha_mask(self, overlay_pil, feather_edge=0):
+    def parse_color(self, color_str):
+        """色文字列をRGB値に変換"""
+        color_map = {
+            'white': (255, 255, 255),
+            'black': (0, 0, 0),
+            'red': (255, 0, 0),
+            'green': (0, 255, 0),
+            'blue': (0, 0, 255),
+            'yellow': (255, 255, 0),
+            'cyan': (0, 255, 255),
+            'magenta': (255, 0, 255),
+        }
+        
+        color_str = color_str.lower().strip()
+        
+        # 名前から検索
+        if color_str in color_map:
+            return color_map[color_str]
+        
+        # RGB値として解析（例: "255,255,255" または "#ffffff"）
+        if color_str.startswith('#'):
+            try:
+                hex_color = color_str[1:]
+                if len(hex_color) == 6:
+                    r = int(hex_color[0:2], 16)
+                    g = int(hex_color[2:4], 16)
+                    b = int(hex_color[4:6], 16)
+                    return (r, g, b)
+            except:
+                pass
+        
+        if ',' in color_str:
+            try:
+                rgb = [int(x.strip()) for x in color_str.split(',')]
+                if len(rgb) == 3:
+                    return tuple(rgb)
+            except:
+                pass
+        
+        # デフォルトは白
+        return (255, 255, 255)
+
+    def create_alpha_mask(self, overlay_pil, feather_edge=0, auto_transparent=True, 
+                         transparent_threshold=240, transparent_color="white"):
         """アルファマスクを作成（エッジのぼかし機能付き）"""
         if overlay_pil.mode == 'RGBA':
             alpha = overlay_pil.split()[3]
+        elif auto_transparent:
+            # 自動透過処理を行う
+            target_rgb = self.parse_color(transparent_color)
+            
+            # RGB画像から指定した色に近い部分を透明にする
+            np_img = np.array(overlay_pil)
+            
+            # 各ピクセルと目標色の距離を計算
+            diff = np.abs(np_img.astype(np.float32) - np.array(target_rgb))
+            distance = np.sqrt(np.sum(diff ** 2, axis=2))
+            
+            # 閾値を使って透過度を決定
+            max_distance = np.sqrt(3 * (255 ** 2))  # RGB空間での最大距離
+            threshold_distance = (255 - transparent_threshold) / 255.0 * max_distance
+            
+            # 距離に基づいてアルファ値を計算
+            alpha_values = np.where(distance <= threshold_distance, 
+                                  0,  # 透明
+                                  np.clip((distance - threshold_distance) / threshold_distance * 255, 0, 255))
+            
+            alpha = Image.fromarray(alpha_values.astype(np.uint8), 'L')
         else:
-            # RGBの場合、白い部分を透明、黒い部分を不透明として扱う
-            alpha = overlay_pil.convert('L')
-            # 反転（黒→不透明、白→透明）
-            alpha = Image.eval(alpha, lambda x: 255 - x)
+            # 自動透過なしの場合、すべて不透明
+            alpha = Image.new('L', overlay_pil.size, 255)
         
         # エッジをぼかす
         if feather_edge > 0:
@@ -138,7 +216,8 @@ class TransparentImageComposer:
         return Image.fromarray(result, 'RGB')
     
     def compose_images(self, background_image, overlay_image, x_position, y_position, 
-                      scale, opacity, blend_mode="normal", feather_edge=0):
+                      scale, opacity, blend_mode="normal", feather_edge=0, 
+                      auto_transparent=True, transparent_threshold=240, transparent_color="white"):
         """画像を合成"""
         
         # テンソルをPIL画像に変換
@@ -163,7 +242,8 @@ class TransparentImageComposer:
         result_image = background_pil.copy()
         
         # オーバーレイ画像のアルファマスクを取得
-        alpha_mask = self.create_alpha_mask(overlay_pil, feather_edge)
+        alpha_mask = self.create_alpha_mask(overlay_pil, feather_edge, auto_transparent, 
+                                          transparent_threshold, transparent_color)
         
         # 透明度を適用
         if opacity < 1.0:
